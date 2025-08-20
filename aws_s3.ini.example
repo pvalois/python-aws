@@ -1,0 +1,6 @@
+[pepiniere]
+endpoint=http://minio:9000
+access_key_id=**REDACTED**
+access_key_secret=**REDACTED**
+region=eu-west-3
+
