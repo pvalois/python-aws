@@ -3,129 +3,138 @@
 
 import boto3
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from rich.console import Console
 from rich.table import Table
 from rich.box import SIMPLE_HEAVY
 
-def get_all_resource_costs(start, end, ce_client):
-    costs_map = {}
-    try:
-        paginator = ce_client.get_paginator('get_cost_and_usage_with_resources')
-        param = {
-            'TimePeriod': {'Start': start, 'End': end},
-            'Granularity': 'MONTHLY',
-            'Metrics': ['UnblendedCost'],
-            'GroupBy': [{'Type': 'DIMENSION', 'Key': 'RESOURCE_ID'}]
-        }
-        for page in paginator.paginate(**param):
-            for result in page['ResultsByTime']:
-                for group in result['Groups']:
-                    rid = group['Keys'][0]
-                    amount = float(group['Metrics']['UnblendedCost']['Amount'])
-                    costs_map[rid] = costs_map.get(rid, 0.0) + amount
-    except:
-        pass
-    return costs_map
+# --- CONFIGURATION ---
+FALLBACK_PRICES = {
+    "EIP": 3.66,      # $0.005/hr
+    "EBS_GB": 0.10,   
+    "SNAP_GB": 0.05,  
+    "ALB": 16.42
+}
 
-def get_all_service_costs(start, end, ce_client):
-    service_map = {}
+def get_unit_costs(ce_client):
+    """Récupère les prix réels du client pour l'affichage des gains potentiels."""
+    prices = {"EBS": (FALLBACK_PRICES["EBS_GB"], True), "SNAP": (FALLBACK_PRICES["SNAP_GB"], True)}
     try:
-        resp = ce_client.get_cost_and_usage(
+        today = datetime.now(timezone.utc).date()
+        start = (today - timedelta(days=32)).replace(day=1).isoformat()
+        end = today.replace(day=1).isoformat()
+        r = ce_client.get_cost_and_usage(
             TimePeriod={'Start': start, 'End': end},
-            Granularity='MONTHLY',
-            Metrics=['UnblendedCost'],
-            GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
+            Granularity='MONTHLY', Metrics=['UnblendedCost', 'UsageQuantity'],
+            GroupBy=[{'Type': 'DIMENSION', 'Key': 'USAGE_TYPE'}]
         )
-        for result in resp['ResultsByTime']:
-            for group in result['Groups']:
-                svc = group['Keys'][0]
-                amount = float(group['Metrics']['UnblendedCost']['Amount'])
-                service_map[svc] = amount
-    except:
-        pass
-    return service_map
+        for group in r.get('ResultsByTime', [])[0].get('Groups', []):
+            utype, cost, qty = group['Keys'][0], float(group['Metrics']['UnblendedCost']['Amount']), float(group['Metrics']['UsageQuantity']['Amount'])
+            if qty > 0:
+                if "EBS:VolumeUsage" in utype: prices["EBS"] = (cost/qty, False)
+                elif "EBS:SnapshotUsage" in utype: prices["SNAP"] = (cost/qty, False)
+    except: pass
+    return prices
 
-def list_ec2(s): return [i.id for i in s.resource('ec2').instances.all()]
-def list_ebs(s): return [v.id for v in s.resource('ec2').volumes.all()]
-def list_s3(s): return [b.name for b in s.resource('s3').buckets.all()]
-def list_elb(s): return [lb['LoadBalancerName'] for lb in s.client('elb').describe_load_balancers()['LoadBalancerDescriptions']]
-def list_rds(s): return [db['DBInstanceIdentifier'] for db in s.client('rds').describe_db_instances()['DBInstances']]
-def list_lambda(s): return [fn['FunctionName'] for fn in s.client('lambda').list_functions()['Functions']]
-def list_subnets(s): return [sn.id for sn in s.resource('ec2').subnets.all()]
-def list_dynamodb(s): return s.client('dynamodb').list_tables()['TableNames']
-def list_redshift(s): return [c['ClusterIdentifier'] for c in s.client('redshift').describe_clusters()['Clusters']]
-def list_sqs(s): return [q.split('/')[-1] for q in s.client('sqs').list_queues().get('QueueUrls', [])]
-def list_sns(s): return [t['TopicArn'].split(':')[-1] for t in s.client('sns').list_topics().get('Topics', [])]
+def get_orphans(session):
+    ec2_c = session.client('ec2')
+    ec2_r = session.resource('ec2')
+    elbv2 = session.client('elbv2')
+    
+    # 1. EIPs
+    eips = []
+    for e in ec2_c.describe_addresses().get('Addresses', []):
+        if not e.get('InstanceId') and not e.get('NetworkInterfaceId'):
+            name = next((t['Value'] for t in e.get('Tags', []) if t['Key'] == 'Name'), "-")
+            eips.append([e.get('PublicIp'), e.get('AllocationId'), name])
+            
+    # 2. Volumes Available
+    vols = []
+    for v in ec2_r.volumes.filter(Filters=[{'Name': 'status', 'Values': ['available']}]):
+        name = next((t['Value'] for t in v.tags or [] if t['Key'] == 'Name'), "-")
+        vols.append([v.id, v.size, name])
 
-def print_output(resources, prometheus=False):
-    if prometheus:
-        for rtype, rid, cost in resources:
-            val = cost if cost is not None else 0.0
-            print(f'aws_cost{{resource="{rid}",type="{rtype}"}} {val:.4f}')
-    else:
-        console = Console()
-        table = Table(box=SIMPLE_HEAVY, header_style="bold magenta")
-        table.add_column("Type", style="cyan")
-        table.add_column("Resource ID", style="white")
-        table.add_column("Cost ($)", justify="right", style="green")
+    # 3. Snapshots (Vraiment orphelins : pas de volume, pas d'AMI)
+    snaps = []
+    amis = ec2_c.describe_images(Owners=['self'])['Images']
+    snaps_in_amis = {bdm['Ebs']['SnapshotId'] for a in amis for bdm in a.get('BlockDeviceMappings', []) if 'Ebs' in bdm}
+    
+    for s in ec2_r.snapshots.filter(OwnerIds=['self']):
+        if s.id in snaps_in_amis: continue
+        try:
+            ec2_r.Volume(s.volume_id).load()
+        except:
+            name = next((t['Value'] for t in s.tags or [] if t['Key'] == 'Name'), "-")
+            snaps.append([s.id, s.volume_size, name])
 
-        for rtype, rid, cost in resources:
-            c_str = f"{cost:.2f}" if cost is not None else "0.00"
-            table.add_row(rtype, rid, c_str)
-        
-        console.print(table)
+    return eips, vols, snaps
+
+def generate_cleanup_scripts(directory, eips, vols, snaps, profile):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    p = f"--profile {profile}" if profile else ""
+    
+    scripts = {
+        "clean_eips.sh": [f"aws ec2 release-address {p} --allocation-id {r[1]}" for r in eips],
+        "clean_volumes.sh": [f"aws ec2 delete-volume {p} --volume-id {r[0]}" for r in vols],
+        "clean_snapshots.sh": [f"aws ec2 delete-snapshot {p} --snapshot-id {r[0]}" for r in snaps]
+    }
+    
+    for name, cmds in scripts.items():
+        if cmds:
+            path = os.path.join(directory, name)
+            with open(path, "w") as f:
+                f.write("#!/bin/bash\n" + "\n".join(cmds) + "\n")
+            os.chmod(path, 0o755)
+    return len(scripts)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-P', '--profile', default='default')
-    parser.add_argument('-d', '--days', type=int, default=30)
-    parser.add_argument('-p', '--prometheus', action='store_true')
+    parser.add_argument('-o', '--output', help="Répertoire de sortie (déclenche la création des scripts)")
     args = parser.parse_args()
 
     session = boto3.Session(profile_name=args.profile)
-    ce = session.client('ce')
+    console = Console()
+    region = session.region_name or "us-east-1"
 
-    end_dt = datetime.now(timezone.utc).date()
-    start_dt = end_dt - timedelta(days=args.days)
-    s_str, e_str = start_dt.isoformat(), end_dt.isoformat()
+    with console.status(f"[bold green]Audit des ressources inutilisées ({region})..."):
+        prices = get_unit_costs(session.client('ce'))
+        eips, vols, snaps = get_orphans(session)
 
-    res_costs = get_all_resource_costs(s_str, e_str, ce)
-    svc_costs = get_all_service_costs(s_str, e_str, ce)
+    console.print(f"\n[bold white on red] AUDIT ORPHELINS - {args.profile} [/]\n", justify="center")
 
-    tasks = [
-        ('EC2', list_ec2, False),
-        ('EBS', list_ebs, False),
-        ('S3', list_s3, False),
-        ('ELB', list_elb, False),
-        ('RDS', list_rds, False),
-        ('Lambda', list_lambda, False),
-        ('Subnet', list_subnets, False),
-        ('DynamoDB', list_dynamodb, False),
-        ('Redshift', list_redshift, False),
-        ('SQS', list_sqs, False),
-        ('SNS', list_sns, False),
-        ('NAT Gateway', 'NAT Gateway', True),
-        ('CloudFront', 'Amazon CloudFront', True),
-    ]
+    p_ebs, fb_ebs = prices["EBS"]
+    p_snap, fb_snap = prices["SNAP"]
+    total_saving = 0
 
-    inventory = []
+    # Affichage Volumes
+    t_vol = Table(box=SIMPLE_HEAVY, title=f"Volumes à supprimer (@{p_ebs:.3f}/GB)", header_style="bold red")
+    t_vol.add_column("ID"); t_vol.add_column("Taille"); t_vol.add_column("Gain/Mois", justify="right")
+    for v in vols:
+        gain = v[1] * p_ebs
+        total_saving += gain
+        t_vol.add_row(v[0], f"{v[1]}GB", f"${gain:.2f}")
+    console.print(t_vol)
 
-    for label, action, is_global in tasks:
-        try:
-            if is_global:
-                cost = svc_costs.get(action, 0.0)
-                inventory.append((label, 'All Resources', cost))
-            else:
-                items = action(session)
-                for item in items:
-                    cost = res_costs.get(item, 0.0)
-                    inventory.append((label, item, cost))
-        except:
-            pass
+    # Affichage Snapshots
+    t_snap = Table(box=SIMPLE_HEAVY, title=f"Snapshots à supprimer (@{p_snap:.3f}/GB)", header_style="bold yellow")
+    t_snap.add_column("ID"); t_snap.add_column("Taille"); t_snap.add_column("Gain/Mois", justify="right")
+    for s in snaps:
+        gain = s[1] * p_snap
+        total_saving += gain
+        t_snap.add_row(s[0], f"{s[1]}GB", f"${gain:.2f}")
+    console.print(t_snap)
 
-    print_output(inventory, args.prometheus)
+    console.print(f"\n[bold green]ÉCONOMIE MENSUELLE POTENTIELLE : ${total_saving:.2f}[/]")
+    if fb_ebs or fb_snap:
+        console.print("[dim red](Note: Certains calculs utilisent des prix par défaut/FALLBACK)[/]")
+
+    if args.output:
+        generate_cleanup_scripts(args.output, eips, vols, snaps, args.profile)
+        console.print(f"\n[bold cyan]SCRIPTS DE NETTOYAGE GÉNÉRÉS DANS : {args.output}[/]\n")
 
 if __name__ == "__main__":
     main()
