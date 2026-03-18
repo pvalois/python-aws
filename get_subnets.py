@@ -5,6 +5,8 @@ import argparse
 import os
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from rich.table import Table, box
+from rich.console import Console
 
 def main():
     parser = argparse.ArgumentParser(description="Lister les subnets AWS")
@@ -22,17 +24,30 @@ def main():
         print(f"Erreur connexion AWS : {e}")
         return
 
+    table = Table(box=box.SIMPLE_HEAVY)
+
+    table.add_column("Subnet ID", style="bold cyan")
+    table.add_column("CIDR", style="bold yellow")
+    table.add_column("Availability Zone", style="bold green")
+    table.add_column("VPC ID")
+    table.add_column("Name")
+
     for sn in resp.get("Subnets", []):
-        subnet_id = sn.get("SubnetId")
+        subnet_id = sn.get("SubnetId",None)
         cidr = sn.get("CidrBlock")
         az = sn.get("AvailabilityZone")
         vpc = sn.get("VpcId")
-        name = "-"
+        name = sn.get("Name","")
         if "Tags" in sn:
             for t in sn["Tags"]:
                 if t["Key"] == "Name":
                     name = t["Value"]
-        print(f"{subnet_id}\t{cidr}\t{az}\t{vpc}\t{name}")
+
+
+        table.add_row(subnet_id,cidr,az,vpc,name)
+
+    console = Console()
+    console.print(table)
 
 if __name__ == "__main__":
     main()

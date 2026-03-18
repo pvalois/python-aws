@@ -1,38 +1,26 @@
 #!/usr/bin/env python3
 import os
-import boto3
-from botocore.client import Config
-from configlocator import *
+from aws_local import client
 
-config=configlocator("aws_s3.ini")
+s3 = client("s3")
+bucket_name = "test"
+response = s3.list_objects_v2(Bucket=bucket_name)
 
-c=config['pepiniere']
-endpoint=c['endpoint']
-access_key=c['access_key_id']
-secret=c['access_key_secret']
-region=c['region']
+with open("/tmp/index.html", "w", encoding="utf-8") as f:
+    f.write("<html><head><title>Index MinIO</title></head><body>\n")
+    f.write(f"<h1>Photos dans {bucket_name}</h1><hr/>\n")
 
-s3 = boto3.resource('s3',
-                    endpoint_url=endpoint,
-                    aws_access_key_id=access_key,
-                    aws_secret_access_key=secret,
-                    config=Config(signature_version='s3v4'),
-                    region_name=region)
+    # On itère sur le contenu renvoyé par le client
+    for obj in response.get("Contents", []):
+        fname = obj["Key"]
 
-s3_bucket = s3.Bucket("test")
+        # On évite d'inclure l'index lui-même dans la liste
+        if fname == "index.html": continue
 
-with open("/tmp/index.html","w") as f:
-  for bucket in s3_bucket.objects.all():
-    fname=bucket.key
-    if (not ".jpg" in fname): continue
-    f.write ('<a href="'+fname+'">'+fname+'</a><br/>')
+        if fname.lower().endswith(".jpg"):
+            f.write(f'<a href="{fname}">{fname}</a><br/>\n')
 
-s3 = boto3.client('s3',
-                  endpoint_url=endpoint,
-                  aws_access_key_id=access_key,
-                  aws_secret_access_key=secret,
-                  config=Config(signature_version='s3v4'),
-                  region_name="")
+    f.write("</body></html>")
 
-s3.upload_file("/tmp/index.html","test","index.html")
-
+print(f"Upload de index.html vers le bucket {bucket_name}...")
+s3.upload_file( "/tmp/index.html", bucket_name, "index.html", ExtraArgs={'ContentType': 'text/html'})

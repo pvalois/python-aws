@@ -1,26 +1,22 @@
 #!/usr/bin/env python3 
 
+import os, re
+import argparse
 from rich.console import Console
 from rich.table import Table, box
-import boto3
-import os
-from colorama import Fore,Back,Style,init
-import argparse
+from aws_local import client
 
-init(autoreset=True)
-
+console=Console()
 profile = os.environ.get("AWS_PROFILE", "default")
-session = boto3.Session(profile_name=profile)
 ec2 = None 
 
 def list_ami(profile="Default"):
 
     try:
-        session = boto3.Session(profile_name=profile)
-        ec2 = session.client("ec2")
+        ec2 = client("ec2")
         response = ec2.describe_images(Owners=['self', 'amazon', 'aws-marketplace'])
     except Exception as e:
-        print(f"{Fore.RED}Connexion à EC2 impossible : {e}")
+        console.print(f"[red]Connexion à EC2 impossible : {e}[/red]")
         return()
 
     images = response['Images']

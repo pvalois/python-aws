@@ -2,34 +2,21 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import json
-import os
-import sys
-import csv
-import boto3
+import json, boto3
+import os, sys, csv
+from aws_local import client
 from botocore.exceptions import BotoCoreError, ClientError
+from rich.table import Table, box
+from rich.console import Console
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Lister les volumes EBS du compte/région (avec filtres simples)."
-    )
-    p.add_argument("--profile", default=os.environ.get("AWS_PROFILE") or os.environ.get("profile") or "default",
-                   help="Profil AWS (default: %(default)s)")
-    p.add_argument("--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
-                   help="Région AWS (ex: eu-west-1). Par défaut: celle du profil/config.")
-    p.add_argument("--state", choices=["creating","available","in-use","deleting","deleted","error"],
-                   help="Filtrer par état du volume EBS.")
-    p.add_argument("--json", action="store_true", help="Sortie JSON.")
-    p.add_argument("--csv", metavar="PATH", help="Écrit la liste en CSV au chemin donné.")
-    return p.parse_args()
-
-def get_ec2_client(profile, region):
-    try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        return session.client("ec2")
-    except (BotoCoreError, ClientError) as e:
-        print(f"Erreur de session/credentials: {e}", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", default=os.environ.get("AWS_PROFILE") or os.environ.get("profile") or "default", help="Profil AWS (default: %(default)s)")
+    parser.add_argument("--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"), help="Région AWS (ex: eu-west-1). Par défaut: celle du profil/config.")
+    parser.add_argument("--state", choices=["creating","available","in-use","deleting","deleted","error"], help="Filtrer par état du volume EBS.")
+    parser.add_argument("--json", action="store_true", help="Sortie JSON.")
+    parser.add_argument("--csv", metavar="PATH", help="Écrit la liste en CSV au chemin donné.")
+    return parser.parse_args()
 
 def list_volumes(client, state=None):
     filters = []
@@ -73,18 +60,27 @@ def simplify(volume):
     }
 
 def print_human(rows):
+    console=Console()
+
     if not rows:
-        print("Aucun volume trouvé.")
+        console.print("Aucun volume trouvé.")
         return
-    # En-tête
-    header = [
-        "VolumeId", "State", "SizeGiB", "Type", "AZ", "Encrypted", "AttachedTo", "Tags"
-    ]
-    print("\t".join(header))
+    
+    table = Table(box=box.SIMPLE_HEAVY)
+
+    table.add_column("VolumeId")
+    table.add_column("State")
+    table.add_column("SizeGiB")
+    table.add_column("Type")
+    table.add_column("AZ")
+    table.add_column("Encrypted")
+    table.add_column("AttachedTo")
+    table.add_column("Tags")
+
     for r in rows:
         attached = ",".join([a["InstanceId"] for a in r["Attachments"]]) if r["Attachments"] else "-"
         tags = ",".join(f'{k}={v}' for k,v in r["Tags"].items()) if r["Tags"] else "-"
-        line = [
+        table.add_row (
             r["VolumeId"] or "",
             r["State"] or "",
             str(r["SizeGiB"] or ""),
@@ -93,12 +89,12 @@ def print_human(rows):
             str(r["Encrypted"]),
             attached,
             tags
-        ]
-        print("\t".join(line))
+            )
+
+    console.print(table)
 
 def write_csv(path, rows):
     fieldnames = list(rows[0].keys()) if rows else []
-    # Aplatis attachments/tags pour CSV simple
     flat_rows = []
     for r in rows:
         flat = r.copy()
@@ -114,17 +110,20 @@ def write_csv(path, rows):
 
 def main():
     args = parse_args()
-    client = get_ec2_client(args.profile, args.region)
-    vols = [simplify(v) for v in list_volumes(client, state=args.state)]
+    ec2 = client("ec2")
+
+    vols = [simplify(v) for v in list_volumes(ec2, state=args.state)]
 
     if args.csv:
         write_csv(args.csv, vols)
         print(f"CSV écrit: {args.csv}")
+        exit(0)
 
     if args.json:
         print(json.dumps(vols, ensure_ascii=False, indent=2))
-    elif not args.csv:
-        print_human(vols)
+        exit(0)
+
+    print_human(vols)
 
 if __name__ == "__main__":
     main()

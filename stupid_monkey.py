@@ -1,12 +1,10 @@
 #!/usr/bin/env python3 
 
 import random
-import boto3
 import os
+from aws_local import client
 
-profile = os.environ.get("AWS_PROFILE", "default")
-session = boto3.Session(profile_name=profile)
-ec3 = None
+ec2 = client("ec2")
 
 def chaos_monkey(lab_name, min_stop=1, max_stop=3, action='stop'):
     """
@@ -17,10 +15,17 @@ def chaos_monkey(lab_name, min_stop=1, max_stop=3, action='stop'):
     :param max_stop: Nombre maximum de VMs à affecter
     :param action: 'stop' ou 'terminate'
     """
-    instances = list(ec2.instances.filter(
-        Filters=[{'Name': 'tag:Lab', 'Values': [lab_name]}, {'Name': 'instance-state-name', 'Values': ['running']}]
-    ))
-    
+
+    instances = []
+    filters = [{'Name': 'instance-state-name', 'Values': ['running']},
+               {'Name': 'tag:Lab', 'Values': [lab_name]}
+              ]
+    response = ec2.describe_instances(Filters=filters)
+
+    for reservation in response.get('Reservations', []):
+        for instance in reservation.get('Instances', []):
+            instances.append(instance['InstanceId'])
+
     if not instances:
         print(f"Aucune instance running trouvée dans le lab {lab_name}")
         return
@@ -30,23 +35,15 @@ def chaos_monkey(lab_name, min_stop=1, max_stop=3, action='stop'):
     
     print(f"Chaos monkey : on {action} {n} instances dans le lab {lab_name}")
     for instance in targets:
-        print(f"{action.capitalize()} instance {instance.id}")
+        print(f"{action.capitalize()} instance {instance}")
         if action == 'stop':
-            instance.stop()
+            ec2.stop_instances(InstanceIds=targets)
         elif action == 'terminate':
-            instance.terminate()
+            ec2.terminate_instances(InstanceIds=targets)
         else:
-            print("Action inconnue :", action)
+            print(f"Action inconnue : {action}")
 
-# Exemple d'exécution
 if __name__ == "__main__":
-    ec3 = session.resource('ec2')
-
-    try:
-        any(ec3.instances.limit(1))
-    except Exception as e:
-        print("Connexion à EC2 impossible :", e)
-        exit(1)
-
+    ec2 = client("ec2")
     chaos_monkey('lab1', min_stop=1, max_stop=2, action='stop')
 

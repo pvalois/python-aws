@@ -1,51 +1,44 @@
 #!/usr/bin/env python3
-import os
-import boto3
-from botocore.client import Config
-from configlocator import *
+from aws_local import client
 from rich.table import Table, box
 from rich.console import Console
 import humanize
 
-config=configlocator("aws_s3.ini")
+console = Console()
 
-c=config['pepiniere']
-endpoint=c['endpoint']
-access_key=c['access_key_id']
-secret=c['access_key_secret']
-region=c['region']
+# --- Créer le client S3 ---
+s3 = client("s3")
 
-s3 = boto3.resource('s3',
-                    endpoint_url=endpoint,
-                    aws_access_key_id=access_key,
-                    aws_secret_access_key=secret,
-                    config=Config(signature_version='s3v4'),
-                    region_name=region)
+# --- Lister les buckets ---
+buckets = s3.list_buckets().get("Buckets", [])
 
-for bucket in s3.buckets.all():
-    count = sum(1 for _ in bucket.objects.all())
-    console=Console()
+for bucket in buckets:
+    bucket_name = bucket["Name"]
+    total_size = 0
 
-    table = Table(title=f"bucket: {bucket.name}",box=box.MINIMAL, show_lines=False)
+    # Lister les objets du bucket
+    response = s3.list_objects_v2(Bucket=bucket_name)
+    objects = response.get("Contents", [])
 
+    table = Table(title=f"Bucket: {bucket_name}", box=box.SIMPLE_HEAVY, show_lines=False)
     table.add_column("Key", style="white", justify="center")
     table.add_column("Size", style="white", justify="right")
     table.add_column("Last Modified", style="cyan")
     table.add_column("Storage Class", style="yellow")
 
-    total_size=0 
-
-    for obj in bucket.objects.all():
-        key=f"{obj.key}"
-        size=f"{obj.size:,}"
-        lastmod=f"{obj.last_modified}"
-        storage=f"{obj.storage_class}"
-        table.add_row(key,size,lastmod,storage)
-        total_size += obj.size
+    for obj in objects:
+        key = obj["Key"]
+        size = obj["Size"]
+        lastmod = str(obj["LastModified"])
+        storage = obj.get("StorageClass", "STANDARD")
+        table.add_row(key, f"{size:,}", lastmod, storage)
+        total_size += size
 
     table.caption = (
-        f"Taille totale : {total_size:,} octets"
-        f" ({humanize.naturalsize(total_size, binary=True)})"
+        f"Taille totale : {total_size:,} octets "
+        f"({humanize.naturalsize(total_size, binary=True)})"
     )
 
     console.print(table)
+    console.print()
+

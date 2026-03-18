@@ -8,17 +8,21 @@ profile = os.environ.get("AWS_PROFILE", "default")
 session = boto3.Session(profile_name=profile)
 ec2=None
 
-def tag_instance(instance_id, key, value, dry_run=False):
-    print  (f"Tag apply on {instance_id} : {key}={value}")
-    if not dry_run: 
-        instance = ec2.Instance(instance_id)
-        instance.create_tags(Tags=[{'Key': key, 'Value': value}])
+def tag_instances(instance_ids, key, value, dry_run=False):
+    print(f"Tag APPLY on {len(instance_ids)} instances: {key}={value}")
+    if not dry_run:
+        ec2.create_tags(Resources=instance_ids, Tags=[{'Key': key, 'Value': value}])
+
+def detag_instances(instance_ids, key, dry_run=False):
+    print(f"Tag REMOVE on {len(instance_ids)} instances: {key}")
+    if not dry_run:
+        ec2.meta.client.delete_tags(Resources=instance_ids, Tags=[{'Key': key}])
 
 if __name__ == "__main__" :
 
     parser = argparse.ArgumentParser(description="Gestion des toggles")
-    parser.add_argument('-k', '--key', required=True, help='Clef à ajouter')
-    parser.add_argument('-v', '--value', required=True, help='Valeur à stocker dans la clef')
+    parser.add_argument('-k', '--key', required=True, help='Clef à ajouter/supprimer')
+    parser.add_argument('-v', '--value', help='Valeur à stocker dans la clef')
     parser.add_argument('--dry-run', action='store_true', help="Simule l'execution sans changer quoi que ce soit")
     parser.add_argument('instances', nargs='*', help="Liste d'instances à tagguer")
 
@@ -32,5 +36,13 @@ if __name__ == "__main__" :
             print("Connexion à EC2 impossible :", e)
             exit(1)
 
-    for _id in args.instances:
-        tag_instance(_id,args.key,args.value,dry_run=args.dry_run)
+    print (args.key,args.key[-1])
+
+    if (args.key.endswith("-")):
+        detag_instances(args.instances,args.key[:-1],dry_run=args.dry_run)
+    else:
+        if (args.value):
+            tag_instances(args.instances,args.key,args.value,dry_run=args.dry_run)
+        else:
+            print ("Key sans Value. Exiting")
+

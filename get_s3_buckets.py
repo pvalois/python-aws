@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
-import os
+
 import boto3
-from botocore.client import Config
-from configlocator import *
+from rich.table import Table,box
+from rich.console import Console
+import humanize
+from aws_local import client
 
-config=configlocator("aws_s3.ini")
+s3 = client("s3")
+buckets = s3.list_buckets()
 
-c=config['pepiniere']
-endpoint=c['endpoint']
-access_key=c['access_key_id']
-secret=c['access_key_secret']
-region=c['region']
+table = Table(box=box.SIMPLE_HEAVY)
+table.add_column("Name", style="cyan", no_wrap=True)
+table.add_column("Creation Time", style="magenta")
+table.add_column("Region", style="green")
+table.add_column("Files", justify="right")
+table.add_column("Size", justify="right")
 
-s3 = boto3.resource('s3',
-                    endpoint_url=endpoint,
-                    aws_access_key_id=access_key,
-                    aws_secret_access_key=secret,
-                    config=Config(signature_version='s3v4'),
-                    region_name=region)
+buckets_list=sorted(buckets.get("Buckets", []), key=lambda x: x["CreationDate"], reverse=True)
 
-for bucket in s3.buckets.all():
-    print(f"{bucket.name}")
+for bucket in buckets_list: 
+    nom = bucket["Name"]
+    date_form = str(bucket["CreationDate"])
+    region = bucket.get("BucketRegion") or s3.get_bucket_location(Bucket=nom).get("LocationConstraint") or "us-east-1"
+
+    objets = s3.list_objects_v2(Bucket=nom)
+    nb_fichiers = objets.get('KeyCount', 0)
+    taille_octets = 0
+
+    if 'Contents' in objets:
+        taille_octets = sum(obj.get('Size', 0) for obj in objets['Contents'])
+
+    table.add_row(nom, date_form, region, str(nb_fichiers), humanize.naturalsize(taille_octets))
+
+console = Console()
+console.print(table)
